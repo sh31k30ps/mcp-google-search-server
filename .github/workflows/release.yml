@@ -1,0 +1,141 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    
+    - name: Run tests
+      run: go test -v ./...
+    
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=semver,pattern={{version}}
+          type=semver,pattern={{major}}.{{minor}}
+          type=semver,pattern={{major}}
+    
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: ./deployments/docker/Dockerfile
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+    
+    - name: Generate changelog
+      id: changelog
+      uses: mikepenz/release-changelog-builder-action@v4
+      with:
+        configuration: ".github/changelog-configuration.json"
+        failOnError: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        body: ${{ steps.changelog.outputs.changelog }}
+        files: |
+          LICENSE
+          README.md
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  helm-release:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+    
+    - name: Configure Git
+      run: |
+        git config user.name "$GITHUB_ACTOR"
+        git config user.email "$GITHUB_ACTOR@users.noreply.github.com"
+    
+    - name: Install Helm
+      uses: azure/setup-helm@v4
+      with:
+        version: 'v3.12.0'
+    
+    - name: Package Helm Chart
+      run: |
+        helm package deployments/helm/mcp-google-search
+    
+    - name: Update Helm Chart version
+      run: |
+        VERSION=${GITHUB_REF#refs/tags/v}
+        sed -i "s/version: .*/version: $VERSION/" deployments/helm/mcp-google-search/Chart.yaml
+        sed -i "s/appVersion: .*/appVersion: \"$VERSION\"/" deployments/helm/mcp-google-search/Chart.yaml
+    
+    - name: Create Helm Release
+      run: |
+        helm package deployments/helm/mcp-google-search
+        mv *.tgz helm-charts/
+      
+    - name: Upload Helm Chart
+      uses: actions/upload-artifact@v4
+      with:
+        name: helm-chart
+        path: "*.tgz"
+
+  goreleaser:
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+    
+    - name: Run GoReleaser
+      uses: goreleaser/goreleaser-action@v6
+      with:
+        distribution: goreleaser
+        version: latest
+        args: release --clean
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
