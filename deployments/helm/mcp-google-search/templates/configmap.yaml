@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "mcp-google-search.fullname" . }}
+  labels:
+    {{- include "mcp-google-search.labels" . | nindent 4 }}
+data:
+  port: {{ .Values.config.port | quote }}
+  log_level: {{ .Values.config.logLevel | quote }}
+  max_results: {{ .Values.config.maxResults | quote }}
+  rate_limit_per_min: {{ .Values.config.rateLimitPerMin | quote }}
